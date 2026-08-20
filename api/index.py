@@ -1,13 +1,25 @@
 import os
 import json
 import base64
+import re
 import requests
 from http.server import BaseHTTPRequestHandler
 
-# Очищаем переменные от случайных кавычек, пробелов и скобок
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip().strip("'\"[]")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip().strip("'\"[]")
-GOOGLE_SHEET_WEBHOOK_URL = os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", "").strip().strip("'\"[]")
+def clean_url(val):
+    if not val:
+        return ""
+    val = str(val).strip().strip("'\"[]")
+    m = re.search(r'\((https?://[^)]+)\)', val)
+    if m:
+        return m.group(1).strip()
+    m2 = re.search(r'https?://[^\s\]\)\"]+', val)
+    if m2:
+        return m2.group(0).strip()
+    return val
+
+TELEGRAM_TOKEN = str(os.environ.get("TELEGRAM_TOKEN", "")).strip().strip("'\"[]")
+GEMINI_API_KEY = str(os.environ.get("GEMINI_API_KEY", "")).strip().strip("'\"[]")
+GOOGLE_SHEET_WEBHOOK_URL = clean_url(os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", ""))
 
 def send_tg_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -35,8 +47,10 @@ def parse_receipt_with_ai(image_bytes):
     Ответ дай строго валидным JSON без markdown-разметки (без ```json). Поле amount должно быть числом (float).
     """
     
-    # Передаем ключ через заголовки x-goog-api-key, чтобы исключить любые ошибки в URL
-    url = "[https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent](https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent)"
+    host = "generativelanguage.googleapis.com"
+    path = "/v1beta/models/gemini-1.5-flash:generateContent"
+    url = f"https://{host}{path}"
+    
     headers = {
         "Content-Type": "application/json",
         "x-goog-api-key": GEMINI_API_KEY
@@ -54,7 +68,7 @@ def parse_receipt_with_ai(image_bytes):
     res_data = res.json()
     
     if "error" in res_data:
-        raise Exception(f"Google API Error: {res_data['error'].get('message', 'Неизвестная ошибка ключа')}")
+        raise Exception(f"Google API Error: {res_data['error'].get('message', 'Ошибка ключа API')}")
         
     raw_text = res_data["candidates"][0]["content"]["parts"][0]["text"].strip()
     raw_text = raw_text.replace("```json", "").replace("```", "").strip()
