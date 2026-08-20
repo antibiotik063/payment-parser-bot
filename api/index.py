@@ -6,37 +6,43 @@ import traceback
 import requests
 from http.server import BaseHTTPRequestHandler
 
-def clean_val(val):
-    if not val:
+def sanitize_url(raw):
+    if not raw:
         return ""
-    val = str(val).strip().strip("'\"[]")
-    m = re.search(r'\((https?://[^)]+)\)', val)
-    if m:
-        return m.group(1).strip()
-    m2 = re.search(r'https?://[^\s\]\)\"]+', val)
-    if m2:
-        return m2.group(0).strip()
-    return val
+    s = str(raw).strip()
+    s = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', s)
+    s = re.sub(r'\[.*?\]\((.*?)\)', r'\1', s)
+    s = s.replace("[", "").replace("]", "").replace("'", "").replace('"', "").strip()
+    return s
 
-TELEGRAM_TOKEN = str(os.environ.get("TELEGRAM_TOKEN", "")).strip().strip("'\"[]")
-GEMINI_API_KEY = str(os.environ.get("GEMINI_API_KEY", "")).strip().strip("'\"[]")
-GOOGLE_SHEET_WEBHOOK_URL = clean_val(os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", ""))
+def sanitize_str(raw):
+    if not raw:
+        return ""
+    return str(raw).strip().strip("'\"[]")
+
+TELEGRAM_TOKEN = sanitize_str(os.environ.get("TELEGRAM_TOKEN", ""))
+GEMINI_API_KEY = sanitize_str(os.environ.get("GEMINI_API_KEY", ""))
+GOOGLE_SHEET_WEBHOOK_URL = sanitize_url(os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", ""))
+
+TG_API_HOST = "https://" + "api" + ".telegram.org"
+GEMINI_API_HOST = "https://" + "generativelanguage" + ".googleapis.com"
 
 def send_tg_message(chat_id, text):
     if not TELEGRAM_TOKEN or not chat_id:
         return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = f"{TG_API_HOST}/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
         requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=10)
     except Exception as e:
         print(f"Error sending TG message: {e}")
 
 def get_file_info(file_id):
-    f_res = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}", timeout=10).json()
+    url = f"{TG_API_HOST}/bot{TELEGRAM_TOKEN}/getFile"
+    f_res = requests.get(url, params={"file_id": file_id}, timeout=10).json()
     file_path = f_res.get("result", {}).get("file_path")
     if not file_path:
-        raise Exception("Не удалось получить путь к файлу в Telegram API.")
-    download_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+        raise Exception("Не удалось получить путь к файлу из Telegram.")
+    download_url = f"{TG_API_HOST}/file/bot{TELEGRAM_TOKEN}/{file_path}"
     return requests.get(download_url, timeout=25).content
 
 def parse_receipt_with_ai(file_bytes, mime_type="image/jpeg"):
@@ -53,35 +59,10 @@ def parse_receipt_with_ai(file_bytes, mime_type="image/jpeg"):
 }
 Ответ дай строго валидным JSON без markdown-разметки (без ```json). Поле amount — число (float).
 """
-    # 1. Запрашиваем у Google список доступных моделей
-    list_url = f"[https://generativelanguage.googleapis.com/v1beta/models?key=](https://generativelanguage.googleapis.com/v1beta/models?key=){GEMINI_API_KEY}"
-    list_res = requests.get(list_url, timeout=15)
-    list_data = list_res.json()
-    
-    if "error" in list_data:
-        err_msg = list_data["error"].get("message", str(list_data["error"]))
-        raise Exception(f"Google Key Error: {err_msg}")
-    
-    available_models = []
-    for m in list_data.get("models", []):
-        if "generateContent" in m.get("supportedGenerationMethods", []):
-            available_models.append(m.get("name", ""))
-            
-    if not available_models:
-        raise Exception("В аккаунте Google AI нет доступных моделей генерации.")
-        
-    chosen_model = None
-    for pref in ["gemini-2.0-flash", "gemini-1.5-flash", "flash", "gemini-1.5-pro", "gemini"]:
-        for m in available_models:
-            if pref in m:
-                chosen_model = m
-                break
-        if chosen_model:
-            break
-    if not chosen_model:
-        chosen_model = available_models[0]
-        
-    gen_url = f"[https://generativelanguage.googleapis.com/v1beta/](https://generativelanguage.googleapis.com/v1beta/){chosen_model}:generateContent?key={GEMINI_API_KEY}"
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+    }
     payload = {
         "contents": [{
             "parts": [
@@ -90,18 +71,46 @@ def parse_receipt_with_ai(file_bytes, mime_type="image/jpeg"):
             ]
         }]
     }
-    headers = {"Content-Type": "application/json"}
-    res = requests.post(gen_url, json=payload, headers=headers, timeout=30)
-    res_data = res.json()
-    
-    if "error" in res_data:
-        raise Exception(f"Google Model Error: {res_data['error'].get('message', 'Ошибка генерации')}")
-        
-    raw_text = res_data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    raw_text = re.sub(r"^```json\s*", "", raw_text, flags=re.MULTILINE)
-    raw_text = re.sub(r"^```\s*", "", raw_text, flags=re.MULTILINE)
-    raw_text = raw_text.strip()
-    return json.loads(raw_text)
+
+    # 1. Автоматический запрос списка доступных моделей для вашего ключа
+    available_models = []
+    try:
+        list_url = f"{GEMINI_API_HOST}/v1beta/models"
+        list_res = requests.get(list_url, headers=headers, params={"key": GEMINI_API_KEY}, timeout=10)
+        list_data = list_res.json()
+        if "models" in list_data:
+            for m in list_data["models"]:
+                if "generateContent" in m.get("supportedGenerationMethods", []):
+                    m_name = m.get("name", "").replace("models/", "")
+                    available_models.append(m_name)
+    except Exception:
+        pass
+
+    # Приоритет моделей
+    candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro"]
+    if available_models:
+        candidate_models = [m for m in available_models if "flash" in m] + [m for m in available_models if "pro" in m] + available_models
+
+    last_error = "Неизвестная ошибка"
+    for model_name in candidate_models:
+        gen_url = f"{GEMINI_API_HOST}/v1beta/models/{model_name}:generateContent"
+        try:
+            res = requests.post(gen_url, json=payload, headers=headers, params={"key": GEMINI_API_KEY}, timeout=30)
+            res_data = res.json()
+            if "error" in res_data:
+                last_error = res_data["error"].get("message", "API Error")
+                continue
+            if "candidates" in res_data and len(res_data["candidates"]) > 0:
+                raw_text = res_data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                raw_text = re.sub(r"^```json\s*", "", raw_text, flags=re.MULTILINE)
+                raw_text = re.sub(r"^```\s*", "", raw_text, flags=re.MULTILINE)
+                raw_text = raw_text.strip()
+                return json.loads(raw_text)
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    raise Exception(f"Google API Error: {last_error}")
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -131,7 +140,7 @@ class handler(BaseHTTPRequestHandler):
                 self.wfile.write(b'OK')
                 return
 
-            # Текстовые сообщения
+            # Ответ на текстовые команды
             if "text" in message:
                 send_tg_message(chat_id, "👋 <b>Бот на связи!</b>\n\nОтправьте скриншот или PDF платежного поручения, и я сразу занесу его в Google Таблицу.")
                 self.send_response(200)
@@ -139,7 +148,7 @@ class handler(BaseHTTPRequestHandler):
                 self.wfile.write(b'OK')
                 return
 
-            # Файлы и изображения
+            # Обработка вложений
             file_id = None
             mime_type = "image/jpeg"
             if "photo" in message:
@@ -196,7 +205,6 @@ class handler(BaseHTTPRequestHandler):
             if chat_id:
                 send_tg_message(chat_id, f"⚠️ Сбой сервера: {str(global_err)}")
 
-        # Гарантированный возврат HTTP 200 для Telegram
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b'OK')
