@@ -4,9 +4,10 @@ import base64
 import requests
 from http.server import BaseHTTPRequestHandler
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GOOGLE_SHEET_WEBHOOK_URL = os.environ.get("GOOGLE_SHEET_WEBHOOK_URL")
+# Очищаем переменные от случайных кавычек, пробелов и скобок
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip().strip("'\"[]")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip().strip("'\"[]")
+GOOGLE_SHEET_WEBHOOK_URL = os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", "").strip().strip("'\"[]")
 
 def send_tg_message(chat_id, text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -20,6 +21,7 @@ def get_file_bytes(file_id):
 
 def parse_receipt_with_ai(image_bytes):
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
+    
     prompt = """
     Ты финансовый парсер. Проанализируй прикрепленное платежное поручение РФ и извлеки JSON строго следующего формата:
     {
@@ -32,7 +34,13 @@ def parse_receipt_with_ai(image_bytes):
     }
     Ответ дай строго валидным JSON без markdown-разметки (без ```json). Поле amount должно быть числом (float).
     """
-    url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=){GEMINI_API_KEY}"
+    
+    # Передаем ключ через заголовки x-goog-api-key, чтобы исключить любые ошибки в URL
+    url = "[https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent](https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent)"
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+    }
     payload = {
         "contents": [{
             "parts": [
@@ -41,8 +49,14 @@ def parse_receipt_with_ai(image_bytes):
             ]
         }]
     }
-    res = requests.post(url, json=payload).json()
-    raw_text = res["candidates"][0]["content"]["parts"][0]["text"].strip()
+    
+    res = requests.post(url, json=payload, headers=headers)
+    res_data = res.json()
+    
+    if "error" in res_data:
+        raise Exception(f"Google API Error: {res_data['error'].get('message', 'Неизвестная ошибка ключа')}")
+        
+    raw_text = res_data["candidates"][0]["content"]["parts"][0]["text"].strip()
     raw_text = raw_text.replace("```json", "").replace("```", "").strip()
     return json.loads(raw_text)
 
