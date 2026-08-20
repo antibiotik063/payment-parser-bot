@@ -22,13 +22,13 @@ GEMINI_API_KEY = str(os.environ.get("GEMINI_API_KEY", "")).strip().strip("'\"[]"
 GOOGLE_SHEET_WEBHOOK_URL = clean_url(os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", ""))
 
 def send_tg_message(chat_id, text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendMessage"
     requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
 
 def get_file_bytes(file_id):
-    f_res = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}").json()
+    f_res = requests.get(f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/getFile?file_id={file_id}").json()
     file_path = f_res["result"]["file_path"]
-    download_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+    download_url = f"[https://api.telegram.org/file/bot](https://api.telegram.org/file/bot){TELEGRAM_TOKEN}/{file_path}"
     return requests.get(download_url).content
 
 def parse_receipt_with_ai(image_bytes):
@@ -47,14 +47,15 @@ def parse_receipt_with_ai(image_bytes):
     Ответ дай строго валидным JSON без markdown-разметки (без ```json). Поле amount должно быть числом (float).
     """
     
-    host = "generativelanguage.googleapis.com"
-    path = "/v1beta/models/gemini-1.5-flash:generateContent"
-    url = f"https://{host}{path}"
+    # Каскадный список моделей и версий API на случай смены версий Google
+    candidate_endpoints = [
+        ("v1beta", "gemini-2.0-flash"),
+        ("v1beta", "gemini-1.5-flash-latest"),
+        ("v1", "gemini-1.5-flash"),
+        ("v1beta", "gemini-2.5-flash"),
+        ("v1beta", "gemini-1.5-pro")
+    ]
     
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY
-    }
     payload = {
         "contents": [{
             "parts": [
@@ -63,16 +64,31 @@ def parse_receipt_with_ai(image_bytes):
             ]
         }]
     }
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+    }
     
-    res = requests.post(url, json=payload, headers=headers)
-    res_data = res.json()
-    
-    if "error" in res_data:
-        raise Exception(f"Google API Error: {res_data['error'].get('message', 'Ошибка ключа API')}")
-        
-    raw_text = res_data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    raw_text = raw_text.replace("```json", "").replace("```", "").strip()
-    return json.loads(raw_text)
+    last_err = None
+    for api_ver, model_name in candidate_endpoints:
+        url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{model_name}:generateContent"
+        try:
+            res = requests.post(url, json=payload, headers=headers, timeout=25)
+            res_data = res.json()
+            if "error" in res_data:
+                last_err = res_data["error"].get("message", "API error")
+                continue
+            if "candidates" in res_data and len(res_data["candidates"]) > 0:
+                raw_text = res_data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                raw_text = re.sub(r"^```json\s*", "", raw_text, flags=re.MULTILINE)
+                raw_text = re.sub(r"^```\s*", "", raw_text, flags=re.MULTILINE)
+                raw_text = raw_text.strip()
+                return json.loads(raw_text)
+        except Exception as e:
+            last_err = str(e)
+            continue
+            
+    raise Exception(f"Google API Error: {last_err}")
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -104,7 +120,7 @@ class handler(BaseHTTPRequestHandler):
                     "amount": data["amount"],
                     "rate": rate_str
                 }
-                requests.post(GOOGLE_SHEET_WEBHOOK_URL, json=payload, headers={"Content-Type": "application/json"})
+                requests.post(GOOGLE_SHEET_WEBHOOK_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=15)
 
                 msg = (
                     f"✅ <b>Платеж добавлен в Google Таблицу!</b>\n\n"
