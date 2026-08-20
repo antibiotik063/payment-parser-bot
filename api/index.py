@@ -32,8 +32,7 @@ def get_file_info(file_id):
     f_res = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}", timeout=10).json()
     file_path = f_res["result"]["file_path"]
     download_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-    file_bytes = requests.get(download_url, timeout=20).content
-    return file_bytes
+    return requests.get(download_url, timeout=20).content
 
 def parse_receipt_with_ai(file_bytes, mime_type="image/jpeg"):
     b64_data = base64.b64encode(file_bytes).decode("utf-8")
@@ -51,15 +50,14 @@ def parse_receipt_with_ai(file_bytes, mime_type="image/jpeg"):
     Правила:
     1. Ответь строго валидным JSON без markdown-разметки (без ```json и без ```).
     2. Поле amount должно быть числом (float).
-    3. Если поле не удается определить, напиши пустую строку "".
     """
     
-    candidate_endpoints = [
-        ("v1beta", "gemini-2.0-flash"),
-        ("v1beta", "gemini-1.5-flash-latest"),
-        ("v1", "gemini-1.5-flash"),
-        ("v1beta", "gemini-2.5-flash"),
-        ("v1beta", "gemini-1.5-pro")
+    # Список моделей для вызова
+    candidate_models = [
+        "gemini-1.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-pro"
     ]
     
     payload = {
@@ -76,8 +74,8 @@ def parse_receipt_with_ai(file_bytes, mime_type="image/jpeg"):
     }
     
     last_err = None
-    for api_ver, model_name in candidate_endpoints:
-        url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{model_name}:generateContent"
+    for model in candidate_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         try:
             res = requests.post(url, json=payload, headers=headers, timeout=25)
             res_data = res.json()
@@ -124,11 +122,9 @@ class handler(BaseHTTPRequestHandler):
         file_id = None
         mime_type = "image/jpeg"
 
-        # 1. Если отправлено как сжатое фото
         if "photo" in message:
             file_id = message["photo"][-1]["file_id"]
             mime_type = "image/jpeg"
-        # 2. Если отправлено как файл / документ (PNG, JPG, PDF)
         elif "document" in message:
             file_id = message["document"]["file_id"]
             doc_mime = message["document"].get("mime_type", "")
@@ -138,7 +134,6 @@ class handler(BaseHTTPRequestHandler):
                 mime_type = "image/png"
             else:
                 mime_type = "image/jpeg"
-        # 3. Если отправлен текст (например /start)
         elif "text" in message:
             send_tg_message(chat_id, "👋 <b>Бот на связи!</b>\n\nОтправьте скриншот или PDF платежного поручения, и я сразу занесу его в Google Таблицу с расчетом комиссии.")
             self.send_response(200)
